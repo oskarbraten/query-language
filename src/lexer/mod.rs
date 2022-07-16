@@ -40,65 +40,53 @@ impl Lexer {
         }
 
         if let Some(end) = REGEX_WHITESPACE.find(text).map(|m| m.end()) {
-            return self.analyze_recursive(&text[end..]);
-        }
-
-        if let Some(captures) = REGEX_IDENTIFIER.captures(text) {
+            self.analyze_recursive(&text[end..])
+        } else if let Some(captures) = REGEX_IDENTIFIER.captures(text) {
             let identifier: &'a str = captures.name("identifier").unwrap().as_str();
             self.tokens.push(Token::Identifier(self.span(identifier)));
 
             let end = captures[0].len();
-            return self.analyze_recursive(&text[end..]);
-        }
-
-        if REGEX_PUNCTUATION_PARENS_OPEN.is_match(text) {
+            self.analyze_recursive(&text[end..])
+        } else if REGEX_PUNCTUATION_PARENS_OPEN.is_match(text) {
             self.tokens.push(Token::Punctuation(Punctuation::ParenOpen));
-            return self.analyze_recursive(&text[1..]);
+            self.analyze_recursive(&text[1..])
         } else if REGEX_PUNCTUATION_PARENS_CLOSE.is_match(text) {
             self.tokens
                 .push(Token::Punctuation(Punctuation::ParenClose));
-            return self.analyze_recursive(&text[1..]);
-        }
-
-        if REGEX_OPERATOR_AND.is_match(text) {
+            self.analyze_recursive(&text[1..])
+        } else if REGEX_OPERATOR_AND.is_match(text) {
             self.tokens.push(Token::Operator(Operator::And));
-            return self.analyze_recursive(&text[3..]);
+            self.analyze_recursive(&text[3..])
         } else if REGEX_OPERATOR_OR.is_match(text) {
             self.tokens.push(Token::Operator(Operator::Or));
-            return self.analyze_recursive(&text[2..]);
+            self.analyze_recursive(&text[2..])
         } else if REGEX_OPERATOR_NOT.is_match(text) {
             self.tokens.push(Token::Operator(Operator::Not));
-            return self.analyze_recursive(&text[3..]);
+            self.analyze_recursive(&text[3..])
         } else if REGEX_OPERATOR_PLUS.is_match(text) {
             self.tokens.push(Token::Operator(Operator::Plus));
-            return self.analyze_recursive(&text[1..]);
+            self.analyze_recursive(&text[1..])
         } else if REGEX_OPERATOR_MINUS.is_match(text) {
             self.tokens.push(Token::Operator(Operator::Minus));
-            return self.analyze_recursive(&text[1..]);
+            self.analyze_recursive(&text[1..])
         } else if REGEX_OPERATOR_BOOST.is_match(text) {
             self.tokens.push(Token::Operator(Operator::Boost));
-            return self.analyze_recursive(&text[1..]);
-        }
-
-        if let Some(captures) = REGEX_LITERAL_PHRASE.captures(text) {
+            self.analyze_recursive(&text[1..])
+        } else if let Some(captures) = REGEX_LITERAL_PHRASE.captures(text) {
             let phrase: &'a str = captures.name("phrase").unwrap().as_str();
             self.tokens
                 .push(Token::Literal(Literal::Phrase(self.span(phrase))));
 
             let end = captures.name("terminal").unwrap().start();
-            return self.analyze_recursive(&text[end..]);
-        }
-
-        if let Some(captures) = REGEX_LITERAL_REGEX.captures(text) {
+            self.analyze_recursive(&text[end..])
+        } else if let Some(captures) = REGEX_LITERAL_REGEX.captures(text) {
             let regex: &'a str = captures.name("regex").unwrap().as_str();
             self.tokens
                 .push(Token::Literal(Literal::Regex(self.span(regex))));
 
             let end = captures.name("terminal").unwrap().start();
-            return self.analyze_recursive(&text[end..]);
-        }
-
-        if let Some(captures) = REGEX_LITERAL_RANGE.captures(text) {
+            self.analyze_recursive(&text[end..])
+        } else if let Some(captures) = REGEX_LITERAL_RANGE.captures(text) {
             let token = {
                 let start: Bound<Span> = captures
                     .name("start")
@@ -128,10 +116,8 @@ impl Lexer {
             self.tokens.push(token);
 
             let end = captures.name("terminal").unwrap().start();
-            return self.analyze_recursive(&text[end..]);
-        }
-
-        if let Some(captures) = REGEX_LITERAL_TERM.captures(text) {
+            self.analyze_recursive(&text[end..])
+        } else if let Some(captures) = REGEX_LITERAL_TERM.captures(text) {
             let fuzzy_term = captures.name("fterm").map(|m| {
                 let term: &'a str = m.as_str();
 
@@ -157,13 +143,13 @@ impl Lexer {
             };
 
             let end = captures.name("terminal").unwrap().start();
-            return self.analyze_recursive(&text[end..]);
-        };
-
-        Err(LexerError {
-            remaining: text,
-            preceding: self.tokens.drain(..).collect(),
-        })
+            self.analyze_recursive(&text[end..])
+        } else {
+            Err(LexerError {
+                remaining: text,
+                preceding: self.tokens.drain(..).collect(),
+            })
+        }
     }
 
     pub fn next(&mut self) -> Token {
