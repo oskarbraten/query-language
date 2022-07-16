@@ -3,167 +3,180 @@ use std::ops::Bound;
 mod regex;
 use self::regex::*;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Operator {
-    Plus,
-    Minus,
-    And,
-    Or,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Punctuation {
-    Colon,
-    ParensOpen,
-    ParensClose,
-    BracketOpen,
-    BracketClose,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Literal<'a> {
-    Phrase(&'a str),
-    Regex(&'a str),
-    Range(Bound<&'a str>, Bound<&'a str>),
-    Term(&'a str, Option<u8>),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Token<'a> {
-    Identifier(&'a str),
-    Literal(Literal<'a>),
-    Operator(Operator),
-    Punctuation(Punctuation),
-}
+mod token;
+pub use token::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexerError<'a> {
     pub remaining: &'a str,
-    pub preceding: Option<Token<'a>>,
+    pub preceding: Vec<Token>,
 }
 
-fn analyze_recursive<'a>(text: &'a str, tokens: &mut Vec<Token<'a>>) -> Result<(), LexerError<'a>> {
-    if text.is_empty() {
-        return Ok(());
-    }
+pub struct Lexer {
+    tokens: Vec<Token>,
+    offset: usize,
+}
 
-    if let Some(end) = REGEX_WHITESPACE.find(text).map(|m| m.end()) {
-        return analyze_recursive(&text[end..], tokens);
-    }
-
-    if let Some(end) = REGEX_IDENTIFIER.find(text).map(|m| m.end()) {
-        tokens.push(Token::Identifier(&text[..end - 1]));
-        return analyze_recursive(&text[end - 1..], tokens);
-    }
-
-    if REGEX_PUNCTUATION_COLON.is_match(text) {
-        tokens.push(Token::Punctuation(Punctuation::Colon));
-        return analyze_recursive(&text[1..], tokens);
-    } else if REGEX_PUNCTUATION_PARENS_OPEN.is_match(text) {
-        tokens.push(Token::Punctuation(Punctuation::ParensOpen));
-        return analyze_recursive(&text[1..], tokens);
-    } else if REGEX_PUNCTUATION_PARENS_CLOSE.is_match(text) {
-        tokens.push(Token::Punctuation(Punctuation::ParensClose));
-        return analyze_recursive(&text[1..], tokens);
-    }
-
-    if REGEX_OPERATOR_AND.is_match(text) {
-        tokens.push(Token::Operator(Operator::And));
-        return analyze_recursive(&text[3..], tokens);
-    } else if REGEX_OPERATOR_OR.is_match(text) {
-        tokens.push(Token::Operator(Operator::Or));
-        return analyze_recursive(&text[2..], tokens);
-    } else if REGEX_OPERATOR_PLUS.is_match(text) {
-        tokens.push(Token::Operator(Operator::Plus));
-        return analyze_recursive(&text[1..], tokens);
-    } else if REGEX_OPERATOR_MINUS.is_match(text) {
-        tokens.push(Token::Operator(Operator::Minus));
-        return analyze_recursive(&text[1..], tokens);
-    }
-
-    if let Some(captures) = REGEX_LITERAL_PHRASE.captures(text) {
-        let phrase: &'a str = captures.name("phrase").unwrap().as_str();
-        tokens.push(Token::Literal(Literal::Phrase(phrase)));
-
-        let end = captures.name("terminal").unwrap().start();
-        return analyze_recursive(&text[end..], tokens);
-    }
-
-    if let Some(captures) = REGEX_LITERAL_REGEX.captures(text) {
-        let regex: &'a str = captures.name("regex").unwrap().as_str();
-        tokens.push(Token::Literal(Literal::Regex(regex)));
-
-        let end = captures.name("terminal").unwrap().start();
-        return analyze_recursive(&text[end..], tokens);
-    }
-
-    if let Some(captures) = REGEX_LITERAL_RANGE.captures(text) {
-        let token = {
-            let start: Bound<&'a str> = captures
-                .name("start")
-                .filter(|m| !m.as_str().is_empty())
-                .map(|m| Bound::Included(m.as_str()))
-                .unwrap_or(Bound::Unbounded);
-
-            let inclusive = captures
-                .name("inclusive")
-                .filter(|m| !m.as_str().is_empty())
-                .is_some();
-            let end: Bound<&'a str> = captures
-                .name("end")
-                .filter(|m| !m.as_str().is_empty())
-                .map(|m| {
-                    if inclusive {
-                        Bound::Included(m.as_str())
-                    } else {
-                        Bound::Excluded(m.as_str())
-                    }
-                })
-                .unwrap_or(Bound::Unbounded);
-
-            Token::Literal(Literal::Range(start, end))
+impl Lexer {
+    pub fn new<'a>(source: &'a str) -> Result<Self, LexerError<'a>> {
+        let mut lexer = Self {
+            tokens: Vec::new(),
+            offset: source.as_ptr() as usize,
         };
 
-        tokens.push(token);
+        lexer.analyze_recursive(source)?;
+        lexer.tokens.reverse();
 
-        let end = captures.name("terminal").unwrap().start();
-        return analyze_recursive(&text[end..], tokens);
+        Ok(lexer)
     }
 
-    if let Some(captures) = REGEX_LITERAL_TERM.captures(text) {
-        let fuzzy_term = captures.name("fterm").map(|m| {
-            let term: &'a str = m.as_str();
+    fn span(&self, value: &str) -> Span {
+        Span::new(value, self.offset)
+    }
 
-            (
-                term,
-                captures
-                    .name("distance")
+    fn analyze_recursive<'a>(&mut self, text: &'a str) -> Result<(), LexerError<'a>> {
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(end) = REGEX_WHITESPACE.find(text).map(|m| m.end()) {
+            return self.analyze_recursive(&text[end..]);
+        }
+
+        if let Some(captures) = REGEX_IDENTIFIER.captures(text) {
+            let identifier: &'a str = captures.name("identifier").unwrap().as_str();
+            self.tokens.push(Token::Identifier(self.span(identifier)));
+
+            let end = captures[0].len();
+            return self.analyze_recursive(&text[end..]);
+        }
+
+        if REGEX_PUNCTUATION_PARENS_OPEN.is_match(text) {
+            self.tokens.push(Token::Punctuation(Punctuation::ParenOpen));
+            return self.analyze_recursive(&text[1..]);
+        } else if REGEX_PUNCTUATION_PARENS_CLOSE.is_match(text) {
+            self.tokens
+                .push(Token::Punctuation(Punctuation::ParenClose));
+            return self.analyze_recursive(&text[1..]);
+        }
+
+        if REGEX_OPERATOR_AND.is_match(text) {
+            self.tokens.push(Token::Operator(Operator::And));
+            return self.analyze_recursive(&text[3..]);
+        } else if REGEX_OPERATOR_OR.is_match(text) {
+            self.tokens.push(Token::Operator(Operator::Or));
+            return self.analyze_recursive(&text[2..]);
+        } else if REGEX_OPERATOR_NOT.is_match(text) {
+            self.tokens.push(Token::Operator(Operator::Not));
+            return self.analyze_recursive(&text[3..]);
+        } else if REGEX_OPERATOR_PLUS.is_match(text) {
+            self.tokens.push(Token::Operator(Operator::Plus));
+            return self.analyze_recursive(&text[1..]);
+        } else if REGEX_OPERATOR_MINUS.is_match(text) {
+            self.tokens.push(Token::Operator(Operator::Minus));
+            return self.analyze_recursive(&text[1..]);
+        } else if REGEX_OPERATOR_BOOST.is_match(text) {
+            self.tokens.push(Token::Operator(Operator::Boost));
+            return self.analyze_recursive(&text[1..]);
+        }
+
+        if let Some(captures) = REGEX_LITERAL_PHRASE.captures(text) {
+            let phrase: &'a str = captures.name("phrase").unwrap().as_str();
+            self.tokens
+                .push(Token::Literal(Literal::Phrase(self.span(phrase))));
+
+            let end = captures.name("terminal").unwrap().start();
+            return self.analyze_recursive(&text[end..]);
+        }
+
+        if let Some(captures) = REGEX_LITERAL_REGEX.captures(text) {
+            let regex: &'a str = captures.name("regex").unwrap().as_str();
+            self.tokens
+                .push(Token::Literal(Literal::Regex(self.span(regex))));
+
+            let end = captures.name("terminal").unwrap().start();
+            return self.analyze_recursive(&text[end..]);
+        }
+
+        if let Some(captures) = REGEX_LITERAL_RANGE.captures(text) {
+            let token = {
+                let start: Bound<Span> = captures
+                    .name("start")
                     .filter(|m| !m.as_str().is_empty())
-                    .map(|m| m.as_str().parse::<u8>().unwrap())
-                    .unwrap_or(1),
-            )
-        });
+                    .map(|m| Bound::Included(self.span(m.as_str())))
+                    .unwrap_or(Bound::Unbounded);
 
-        if let Some((term, distance)) = fuzzy_term {
-            tokens.push(Token::Literal(Literal::Term(term, Some(distance))));
-        } else {
-            let term: &'a str = captures.name("term").unwrap().as_str();
-            tokens.push(Token::Literal(Literal::Term(term, None)));
+                let inclusive = captures
+                    .name("inclusive")
+                    .filter(|m| !m.as_str().is_empty())
+                    .is_some();
+                let end: Bound<Span> = captures
+                    .name("end")
+                    .filter(|m| !m.as_str().is_empty())
+                    .map(|m| {
+                        if inclusive {
+                            Bound::Included(self.span(m.as_str()))
+                        } else {
+                            Bound::Excluded(self.span(m.as_str()))
+                        }
+                    })
+                    .unwrap_or(Bound::Unbounded);
+
+                Token::Literal(Literal::Range(start, end))
+            };
+
+            self.tokens.push(token);
+
+            let end = captures.name("terminal").unwrap().start();
+            return self.analyze_recursive(&text[end..]);
+        }
+
+        if let Some(captures) = REGEX_LITERAL_TERM.captures(text) {
+            let fuzzy_term = captures.name("fterm").map(|m| {
+                let term: &'a str = m.as_str();
+
+                (
+                    term,
+                    captures
+                        .name("distance")
+                        .filter(|m| !m.as_str().is_empty())
+                        .map(|m| m.as_str().parse::<u8>().unwrap())
+                        .unwrap_or(1),
+                )
+            });
+
+            if let Some((term, distance)) = fuzzy_term {
+                self.tokens.push(Token::Literal(Literal::Term(
+                    self.span(term),
+                    Some(distance),
+                )));
+            } else {
+                let term: &'a str = captures.name("term").unwrap().as_str();
+                self.tokens
+                    .push(Token::Literal(Literal::Term(self.span(term), None)));
+            };
+
+            let end = captures.name("terminal").unwrap().start();
+            return self.analyze_recursive(&text[end..]);
         };
 
-        let end = captures.name("terminal").unwrap().start();
-        return analyze_recursive(&text[end..], tokens);
+        Err(LexerError {
+            remaining: text,
+            preceding: self.tokens.drain(..).collect(),
+        })
     }
 
-    Err(LexerError {
-        remaining: text,
-        preceding: tokens.pop(),
-    })
-}
+    pub fn next(&mut self) -> Token {
+        self.tokens.pop().unwrap_or(Token::Eof)
+    }
 
-pub fn analyze<'a>(text: &'a str) -> Result<Vec<Token<'a>>, LexerError<'a>> {
-    let mut tokens = Vec::new();
-    analyze_recursive(text, &mut tokens).map(|_| tokens)
+    pub fn peek(&mut self) -> Token {
+        self.tokens.last().cloned().unwrap_or(Token::Eof)
+    }
+
+    pub fn collect(self) -> Vec<Token> {
+        self.tokens
+    }
 }
 
 #[cfg(test)]
@@ -171,42 +184,200 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terms() {
+    fn hello_world() {
+        let source = "hello world";
         assert_eq!(
-            analyze("hello world"),
+            Lexer::new(source).map(|lexer| lexer.collect()),
             Ok(vec![
-                Token::Literal(Literal::Term("hello", None)),
-                Token::Literal(Literal::Term("world", None))
+                Token::Literal(Literal::Term(
+                    Span::new(&source[6..], source.as_ptr() as usize),
+                    None
+                )),
+                Token::Literal(Literal::Term(
+                    Span::new(&source[..5], source.as_ptr() as usize),
+                    None
+                )),
             ])
         );
+    }
 
+    #[test]
+    fn hello_and_world() {
+        let source = "hello AND world";
         assert_eq!(
-            analyze("hello AND world"),
+            Lexer::new(source).map(|lexer| lexer.collect()),
             Ok(vec![
-                Token::Literal(Literal::Term("hello", None)),
+                Token::Literal(Literal::Term(
+                    Span::new(&source[10..], source.as_ptr() as usize),
+                    None
+                )),
                 Token::Operator(Operator::And),
-                Token::Literal(Literal::Term("world", None))
+                Token::Literal(Literal::Term(
+                    Span::new(&source[..5], source.as_ptr() as usize),
+                    None
+                )),
             ])
         );
+    }
 
+    #[test]
+    fn hello_or_world() {
+        let source = "hello OR world";
         assert_eq!(
-            analyze("hello OR world"),
+            Lexer::new(source).map(|lexer| lexer.collect()),
             Ok(vec![
-                Token::Literal(Literal::Term("hello", None)),
+                Token::Literal(Literal::Term(
+                    Span::new(&source[9..], source.as_ptr() as usize),
+                    None
+                )),
                 Token::Operator(Operator::Or),
-                Token::Literal(Literal::Term("world", None))
+                Token::Literal(Literal::Term(
+                    Span::new(&source[..5], source.as_ptr() as usize),
+                    None
+                )),
             ])
         );
+    }
 
+    #[test]
+    fn f1_hello_f2_world() {
+        let source = "f1:hello f2:world";
         assert_eq!(
-            analyze("f1:hello f2:world"),
+            Lexer::new(source).map(|lexer| lexer.collect()),
             Ok(vec![
-                Token::Identifier("f1"),
-                Token::Punctuation(Punctuation::Colon),
-                Token::Literal(Literal::Term("hello", None)),
-                Token::Identifier("f2"),
-                Token::Punctuation(Punctuation::Colon),
-                Token::Literal(Literal::Term("world", None))
+                Token::Literal(Literal::Term(
+                    Span::new(&source[12..], source.as_ptr() as usize),
+                    None
+                )),
+                Token::Identifier(Span::new(&source[9..11], source.as_ptr() as usize)),
+                Token::Literal(Literal::Term(
+                    Span::new(&source[3..8], source.as_ptr() as usize),
+                    None
+                )),
+                Token::Identifier(Span::new(&source[..2], source.as_ptr() as usize)),
+            ])
+        );
+    }
+
+    #[test]
+    fn boost1() {
+        let source = "hello^2.3";
+        assert_eq!(
+            Lexer::new(source).map(|lexer| lexer.collect()),
+            Ok(vec![
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: String::from("2.3"),
+                        start: 6,
+                        end: 9
+                    },
+                    None
+                )),
+                Token::Operator(Operator::Boost),
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: String::from("hello"),
+                        start: 0,
+                        end: 5
+                    },
+                    None
+                ))
+            ])
+        );
+    }
+
+    #[test]
+    fn boost2() {
+        let source = "tester hello^2.3foo";
+        assert_eq!(
+            Lexer::new(source).map(|lexer| lexer.collect()),
+            Ok(vec![
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: String::from("2.3foo"),
+                        start: 13,
+                        end: 19
+                    },
+                    None
+                )),
+                Token::Operator(Operator::Boost),
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: String::from("hello"),
+                        start: 7,
+                        end: 12
+                    },
+                    None
+                )),
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: String::from("tester"),
+                        start: 0,
+                        end: 6
+                    },
+                    None
+                ))
+            ])
+        );
+    }
+
+    #[test]
+    fn boost3() {
+        let source = "hello^2.3 foobar";
+        assert_eq!(
+            Lexer::new(source).map(|lexer| lexer.collect()),
+            Ok(vec![
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: String::from("foobar"),
+                        start: 10,
+                        end: 16
+                    },
+                    None
+                )),
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: String::from("2.3"),
+                        start: 6,
+                        end: 9
+                    },
+                    None
+                )),
+                Token::Operator(Operator::Boost),
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: String::from("hello"),
+                        start: 0,
+                        end: 5
+                    },
+                    None
+                ))
+            ])
+        );
+    }
+
+    #[test]
+    fn date1() {
+        let source = "not-a-date 1990-12-31T23:59:60Z";
+        assert_eq!(
+            Lexer::new(source).map(|lexer| lexer.collect()),
+            Ok(vec![
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: String::from("1990-12-31T23:59:60Z"),
+                        start: 11,
+                        end: 31
+                    },
+                    None
+                )),
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: String::from("not-a-date"),
+                        start: 0,
+                        end: 10
+                    },
+                    None
+                ))
             ])
         );
     }
@@ -228,28 +399,69 @@ mod tests {
 
     #[test]
     fn simple_analyze() {
-        let query = r###"f1:hello AND f2:"Hello, world!" OR f3:(rofl +cool -beans)"###;
-
-        let tokens = vec![
-            Token::Identifier("f1"),
-            Token::Punctuation(Punctuation::Colon),
-            Token::Literal(Literal::Term("hello", None)),
-            Token::Operator(Operator::And),
-            Token::Identifier("f2"),
-            Token::Punctuation(Punctuation::Colon),
-            Token::Literal(Literal::Phrase("Hello, world!")),
-            Token::Operator(Operator::Or),
-            Token::Identifier("f3"),
-            Token::Punctuation(Punctuation::Colon),
-            Token::Punctuation(Punctuation::ParensOpen),
-            Token::Literal(Literal::Term("rofl", None)),
-            Token::Operator(Operator::Plus),
-            Token::Literal(Literal::Term("cool", None)),
-            Token::Operator(Operator::Minus),
-            Token::Literal(Literal::Term("beans", None)),
-            Token::Punctuation(Punctuation::ParensClose),
-        ];
-
-        assert_eq!(analyze(query).unwrap(), tokens);
+        let source = r###"f1:hello AND f2:"Hello, world!" OR f3:(rofl +cool -beans)"###;
+        assert_eq!(
+            Lexer::new(source).map(|lexer| lexer.collect()),
+            Ok(vec![
+                Token::Punctuation(Punctuation::ParenClose),
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: "beans".to_string(),
+                        start: 51,
+                        end: 56
+                    },
+                    None
+                )),
+                Token::Operator(Operator::Minus),
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: "cool".to_string(),
+                        start: 45,
+                        end: 49
+                    },
+                    None
+                )),
+                Token::Operator(Operator::Plus),
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: "rofl".to_string(),
+                        start: 39,
+                        end: 43
+                    },
+                    None
+                )),
+                Token::Punctuation(Punctuation::ParenOpen),
+                Token::Identifier(Span {
+                    value: "f3".to_string(),
+                    start: 35,
+                    end: 37
+                }),
+                Token::Operator(Operator::Or),
+                Token::Literal(Literal::Phrase(Span {
+                    value: "Hello, world!".to_string(),
+                    start: 17,
+                    end: 30
+                })),
+                Token::Identifier(Span {
+                    value: "f2".to_string(),
+                    start: 13,
+                    end: 15
+                }),
+                Token::Operator(Operator::And),
+                Token::Literal(Literal::Term(
+                    Span {
+                        value: "hello".to_string(),
+                        start: 3,
+                        end: 8
+                    },
+                    None
+                )),
+                Token::Identifier(Span {
+                    value: "f1".to_string(),
+                    start: 0,
+                    end: 2
+                })
+            ])
+        );
     }
 }
