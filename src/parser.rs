@@ -12,31 +12,28 @@ use time::{
 
 use crate::lexer::{Lexer, *};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Occurrence {
     Required,
     Forbidden,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Primitive {
     String(String),
-    Date(OffsetDateTime),
     Float(f64),
-    Int(i64),
     UInt(u64),
+    Int(i64),
+    Date(OffsetDateTime),
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Ord)]
 pub enum FieldKind {
-    String {
-        /// Positions are required to perform phrase queries.
-        positions: bool,
-    },
-    Date,
+    String,
     Float,
-    Int,
     UInt,
+    Int,
+    Date,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, PartialOrd, Eq, Ord)]
@@ -45,7 +42,7 @@ pub struct Field {
     pub kind: FieldKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
     // Terminals:
     Regex(String),
@@ -61,7 +58,7 @@ pub enum Expression {
     Clause(Vec<Expression>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ErrorKind {
     UnexpectedToken,
     ExpectedFieldKind(FieldKind),
@@ -69,10 +66,9 @@ pub enum ErrorKind {
     InvalidFloat(ParseFloatError),
     InvalidInt(ParseIntError),
     InvalidDate(DateTimeParseError),
-    UnexpectedOperator { expected: Vec<Operator> },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
     pub current: Option<Token>,
     pub kind: ErrorKind,
@@ -142,11 +138,11 @@ impl Parser {
                 distance.clone(),
             )),
             Token::Literal(Literal::Phrase(Span { value, .. })) => match kind {
-                FieldKind::String { positions: true } => Ok(Expression::Phrase(value.to_string())),
+                FieldKind::String => Ok(Expression::Phrase(value.to_string())),
                 _ => {
                     return Err(ParseError {
                         current: Some(token.clone()),
-                        kind: ErrorKind::ExpectedFieldKind(FieldKind::String { positions: true }),
+                        kind: ErrorKind::ExpectedFieldKind(FieldKind::String),
                     });
                 }
             },
@@ -383,11 +379,11 @@ mod tests {
 
         fields.insert(Field {
             name: String::from("name"),
-            kind: FieldKind::String { positions: false },
+            kind: FieldKind::String,
         });
         fields.insert(Field {
             name: String::from("memes"),
-            kind: FieldKind::String { positions: true },
+            kind: FieldKind::String,
         });
         fields.insert(Field {
             name: String::from("perceived_date"),
@@ -404,13 +400,67 @@ mod tests {
     #[test]
     fn simple() {
         let lexer = Lexer::new(
-            "name:bar^23 AND test || \"Hello, world!\" || NOT test3 && perceived_date:[2020-01-01T00:00:00Z..]",
+            "name:bar^23 AND test || \"Hello, world!\" || NOT test3 && perceived_date:[1970-01-01T00:00:00Z..]",
         )
         .unwrap();
 
-        panic!(
-            "{:#?}",
-            parse(lexer, fields(), FieldKind::String { positions: true }).unwrap()
+        assert_eq!(
+            parse(lexer, fields(), FieldKind::String),
+            Ok(Expression::Clause(vec![
+                Expression::Clause(vec![
+                    Expression::Clause(vec![
+                        Expression::Occurrence(
+                            Occurrence::Required,
+                            Box::new(Expression::Boost(
+                                23.0,
+                                Box::new(Expression::Field(
+                                    Field {
+                                        name: String::from("name"),
+                                        kind: FieldKind::String,
+                                    },
+                                    Box::new(Expression::Term(
+                                        Primitive::String(String::from("bar")),
+                                        None
+                                    )),
+                                )),
+                            )),
+                        ),
+                        Expression::Occurrence(
+                            Occurrence::Required,
+                            Box::new(Expression::Term(
+                                Primitive::String(String::from("test")),
+                                None
+                            )),
+                        ),
+                    ],),
+                    Expression::Phrase(String::from("Hello, world!"))
+                ]),
+                Expression::Clause(vec![
+                    Expression::Occurrence(
+                        Occurrence::Required,
+                        Box::new(Expression::Occurrence(
+                            Occurrence::Forbidden,
+                            Box::new(Expression::Term(
+                                Primitive::String(String::from("test3")),
+                                None
+                            ))
+                        ))
+                    ),
+                    Expression::Occurrence(
+                        Occurrence::Required,
+                        Box::new(Expression::Field(
+                            Field {
+                                name: String::from("perceived_date"),
+                                kind: FieldKind::Date,
+                            },
+                            Box::new(Expression::Range(
+                                Bound::Included(Primitive::Date(OffsetDateTime::UNIX_EPOCH)),
+                                Bound::Unbounded
+                            ))
+                        ))
+                    )
+                ])
+            ]))
         );
     }
 }
