@@ -1,17 +1,26 @@
-use std::ops::Bound;
+use std::{num::ParseIntError, ops::Bound};
+use thiserror::Error;
 
 mod regex;
 use self::regex::*;
-
 mod token;
 pub use token::*;
+
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum LexerErrorSource {
+    #[error("invalid fuzzy distance, expected whole number in range: 0 < x < 256")]
+    InvalidFuzzyDistance(#[from] ParseIntError),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexerError<'a> {
     pub remaining: &'a str,
     pub preceding: Vec<Token>,
+
+    pub source: Option<LexerErrorSource>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Lexer {
     tokens: Vec<Token>,
     offset: usize,
@@ -118,18 +127,19 @@ impl Lexer {
             let end = captures.name("terminal").unwrap().start();
             self.analyze_recursive(&text[end..])
         } else if let Some(captures) = REGEX_LITERAL_TERM.captures(text) {
-            let fuzzy_term = captures.name("fterm").map(|m| {
-                let term: &'a str = m.as_str();
+            let fuzzy_term = captures.name("fterm").map(|m| m.as_str()).zip(
+                captures
+                    .name("distance")
+                    .filter(|m| !m.as_str().is_empty())
+                    .map(|m| m.as_str().parse::<u8>())
+                    .transpose()
+                    .map_err(|error| LexerError {
+                        remaining: text,
+                        preceding: self.tokens.drain(..).collect(),
 
-                (
-                    term,
-                    captures
-                        .name("distance")
-                        .filter(|m| !m.as_str().is_empty())
-                        .map(|m| m.as_str().parse::<u8>().unwrap())
-                        .unwrap_or(1),
-                )
-            });
+                        source: Some(error.into()),
+                    })?,
+            );
 
             if let Some((term, distance)) = fuzzy_term {
                 self.tokens.push(Token::Literal(Literal::Term(
@@ -148,6 +158,8 @@ impl Lexer {
             Err(LexerError {
                 remaining: text,
                 preceding: self.tokens.drain(..).collect(),
+
+                source: None,
             })
         }
     }

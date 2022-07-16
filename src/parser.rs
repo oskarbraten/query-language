@@ -48,30 +48,38 @@ pub enum Expression {
     Regex(String),
     Phrase(String),
     Range(Bound<Primitive>, Bound<Primitive>),
-    Term(Primitive, Option<u8>),
+    Term(
+        Primitive,
+        /// Fuzzy distance
+        Option<u8>,
+    ),
 
     // Modifiers:
-    Boost(f64, Box<Expression>),
     Occurrence(Occurrence, Box<Expression>),
+    Boost(f64, Box<Expression>),
     Field(Field, Box<Expression>),
 
     Clause(Vec<Expression>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ErrorKind {
+pub enum ParserErrorSource {
     UnexpectedToken,
-    ExpectedFieldKind(FieldKind),
-    NoSuchField { alternatives: Vec<Field> },
+    ExpectedString,
+    NoSuchField(
+        /// Top 3 similarly named fields:
+        Vec<Field>,
+    ),
+
     InvalidFloat(ParseFloatError),
     InvalidInt(ParseIntError),
     InvalidDate(DateTimeParseError),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ParseError {
+pub struct ParserError {
     pub current: Option<Token>,
-    pub kind: ErrorKind,
+    pub source: ParserErrorSource,
 }
 
 struct Parser {
@@ -85,29 +93,29 @@ impl Parser {
         value: &str,
         kind: FieldKind,
         token: Token,
-    ) -> Result<Primitive, ParseError> {
+    ) -> Result<Primitive, ParserError> {
         match kind {
             FieldKind::String { .. } => Ok(Primitive::String(value.to_string())),
             FieldKind::Float => value
                 .parse()
-                .map_err(|error| ErrorKind::InvalidFloat(error))
+                .map_err(|error| ParserErrorSource::InvalidFloat(error))
                 .map(|value| Primitive::Float(value)),
             FieldKind::Int => value
                 .parse()
-                .map_err(|error| ErrorKind::InvalidInt(error))
+                .map_err(|error| ParserErrorSource::InvalidInt(error))
                 .map(|value| Primitive::Int(value)),
             FieldKind::UInt => value
                 .parse()
-                .map_err(|error| ErrorKind::InvalidInt(error))
+                .map_err(|error| ParserErrorSource::InvalidInt(error))
                 .map(|value| Primitive::UInt(value)),
             FieldKind::Date => OffsetDateTime::parse(value, &Rfc3339)
                 .or_else(|_| OffsetDateTime::parse(value, &Iso8601::PARSING))
-                .map_err(|error| ErrorKind::InvalidDate(error))
+                .map_err(|error| ParserErrorSource::InvalidDate(error))
                 .map(|value| Primitive::Date(value)),
         }
-        .map_err(|kind| ParseError {
+        .map_err(|kind| ParserError {
             current: Some(token),
-            kind,
+            source: kind,
         })
     }
 
@@ -116,7 +124,7 @@ impl Parser {
         bound: Bound<Span>,
         kind: FieldKind,
         token: Token,
-    ) -> Result<Bound<Primitive>, ParseError> {
+    ) -> Result<Bound<Primitive>, ParserError> {
         match &bound {
             Bound::Included(span) | Bound::Excluded(span) => {
                 let primitive = self.primitive(span, kind, token)?;
@@ -131,7 +139,7 @@ impl Parser {
         }
     }
 
-    fn literal(&self, token: &Token, kind: FieldKind) -> Result<Expression, ParseError> {
+    fn literal(&self, token: &Token, kind: FieldKind) -> Result<Expression, ParserError> {
         match token {
             Token::Literal(Literal::Term(value, distance)) => Ok(Expression::Term(
                 self.primitive(&value, kind, token.clone())?,
@@ -140,9 +148,9 @@ impl Parser {
             Token::Literal(Literal::Phrase(Span { value, .. })) => match kind {
                 FieldKind::String => Ok(Expression::Phrase(value.to_string())),
                 _ => {
-                    return Err(ParseError {
+                    return Err(ParserError {
                         current: Some(token.clone()),
-                        kind: ErrorKind::ExpectedFieldKind(FieldKind::String),
+                        source: ParserErrorSource::ExpectedString,
                     });
                 }
             },
@@ -153,14 +161,14 @@ impl Parser {
             Token::Literal(Literal::Regex(Span { value, .. })) => {
                 Ok(Expression::Regex(value.to_string()))
             }
-            _ => Err(ParseError {
+            _ => Err(ParserError {
                 current: Some(token.clone()),
-                kind: ErrorKind::UnexpectedToken,
+                source: ParserErrorSource::UnexpectedToken,
             }),
         }
     }
 
-    fn field(&self, token: &Token) -> Result<Field, ParseError> {
+    fn field(&self, token: &Token) -> Result<Field, ParserError> {
         match token {
             Token::Identifier(identifier) => {
                 let identifier: &str = &identifier;
@@ -183,22 +191,18 @@ impl Parser {
                             s2.partial_cmp(s1).unwrap_or(Ordering::Less)
                         });
 
-                        Err(ParseError {
+                        Err(ParserError {
                             current: Some(token.clone()),
-                            kind: ErrorKind::NoSuchField {
-                                alternatives: fields
-                                    .into_iter()
-                                    .take(5)
-                                    .map(|(_, field)| field)
-                                    .collect(),
-                            },
+                            source: ParserErrorSource::NoSuchField(
+                                fields.into_iter().take(3).map(|(_, field)| field).collect(),
+                            ),
                         })
                     }
                 }
             }
-            _ => Err(ParseError {
+            _ => Err(ParserError {
                 current: Some(token.clone()),
-                kind: ErrorKind::UnexpectedToken,
+                source: ParserErrorSource::UnexpectedToken,
             }),
         }
     }
@@ -225,7 +229,7 @@ impl Parser {
         }
     }
 
-    fn expression(&mut self, min_bp: u8, kind: FieldKind) -> Result<Expression, ParseError> {
+    fn expression(&mut self, min_bp: u8, kind: FieldKind) -> Result<Expression, ParserError> {
         let mut lhs = match self.lexer.next() {
             ref token @ Token::Literal(_) => self.literal(token, kind)?,
             ref token @ Token::Identifier(_) => {
@@ -257,9 +261,9 @@ impl Parser {
                 expression
             }
             token => {
-                return Err(ParseError {
+                return Err(ParserError {
                     current: Some(token.clone()),
-                    kind: ErrorKind::UnexpectedToken,
+                    source: ParserErrorSource::UnexpectedToken,
                 })
             }
         };
@@ -285,9 +289,9 @@ impl Parser {
                         let boost = match literal {
                             Expression::Term(Primitive::Float(value), None) => value,
                             _ => {
-                                return Err(ParseError {
+                                return Err(ParserError {
                                     current: Some(token),
-                                    kind: ErrorKind::UnexpectedToken,
+                                    source: ParserErrorSource::UnexpectedToken,
                                 })
                             }
                         };
@@ -332,40 +336,11 @@ impl Parser {
     }
 }
 
-// fn optimize(expression: Expression) -> Expression {
-//     match expression {
-//         Expression::Clause(exprs) => {
-//             let flatten = exprs.iter().all(|expr| match expr {
-//                 Expression::Clause(exprs) => exprs.iter().all(|expr| match expr {
-//                     Expression::Occurrence(Occurrence::Required, _) => false,
-//                     _ => true,
-//                 }),
-//                 _ => true,
-//             });
-
-//             if flatten {
-//                 let exprs = exprs
-//                     .into_iter()
-//                     .flat_map(|expr| match expr {
-//                         Expression::Clause(exprs) => exprs,
-//                         _ => vec![expr],
-//                     })
-//                     .collect();
-
-//                 optimize(Expression::Clause(exprs))
-//             } else {
-//                 Expression::Clause(exprs)
-//             }
-//         }
-//         _ => expression,
-//     }
-// }
-
 pub fn parse(
     lexer: Lexer,
     fields: BTreeSet<Field>,
     default_kind: FieldKind,
-) -> Result<Expression, ParseError> {
+) -> Result<Expression, ParserError> {
     let mut parser = Parser { lexer, fields };
     parser.expression(0, default_kind)
 }
@@ -432,7 +407,7 @@ mod tests {
                                 None
                             )),
                         ),
-                    ],),
+                    ]),
                     Expression::Phrase(String::from("Hello, world!"))
                 ]),
                 Expression::Clause(vec![
